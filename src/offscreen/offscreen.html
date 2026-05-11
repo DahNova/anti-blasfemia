@@ -6,8 +6,9 @@
 </head>
 <body>
   <!-- Offscreen documents non hanno UI visibile.
-       v0.2: l'audio pipeline usa Nano multimodale direttamente,
-       non passa più dal detector testuale. -->
-  <script src="offscreen.js"></script>
+       v0.3 — audio pipeline su Whisper (Transformers.js, on-device, WebGPU). -->
+  <script src="../core/wordlist.js"></script>
+  <script src="../core/detector.js"></script>
+  <script type="module" src="offscreen.js"></script>
 </body>
 </html>

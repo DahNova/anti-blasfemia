@@ -140,6 +140,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       incrementStat(msg.count || 1);
       return;
 
+    // WHISPER_PROGRESS viene inviato dall'offscreen via chrome.runtime.sendMessage,
+    // raggiunge direttamente il popup se aperto. Niente forwarding qui.
+
     case 'PING':
       sendResponse({ ok: true });
       return;

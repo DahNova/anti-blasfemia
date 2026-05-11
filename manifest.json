@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Anti-Bestemmie",
-  "version": "0.1.0",
-  "description": "Censura bestemmie italiane in testo (asterischi) e audio (bip) sulle pagine che visiti. Funziona on-device con Gemini Nano + blocklist locale.",
+  "version": "0.2.0",
+  "description": "Censura bestemmie italiane in testo (asterischi) e audio (bip) sulle pagine che visiti. On-device con Gemini Nano + Whisper.",
 
   "permissions": [
     "storage",
@@ -56,10 +56,17 @@
 
   "web_accessible_resources": [
     {
-      "resources": ["src/offscreen/offscreen.html"],
+      "resources": [
+        "src/offscreen/offscreen.html",
+        "vendor/transformers/*"
+      ],
       "matches": ["<all_urls>"]
     }
   ],
+
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
 
   "minimum_chrome_version": "138"
 }

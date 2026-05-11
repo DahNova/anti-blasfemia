@@ -3,10 +3,10 @@
 Estensione Chrome che censura bestemmie italiane su pagine e audio in tempo reale.
 
 - **Testo (leggi):** bestemmie nei contenuti delle pagine vengono coperte con asterischi (`d*o c*ne`).
-- **Audio (senti):** un bip viene riprodotto in sovrapposizione quando lo speech recognition rileva una bestemmia nell'audio del tab.
+- **Audio (senti):** un bip viene riprodotto in sovrapposizione quando Whisper rileva una bestemmia nell'audio del tab.
 - **AI on-device (prevede):** Gemini Nano (built-in in Chrome) cattura le bestemmie camuffate / creative che la blocklist letterale non vede.
 
-Tutto on-device. Niente API esterne, niente token, niente network.
+Tutto on-device. Niente API esterne, niente token, niente network al runtime (solo download iniziale dei modelli).
 
 ---
 
@@ -124,12 +124,25 @@ Per aggiungere icone, crea `assets/icon16.png`, `assets/icon48.png`, `assets/ico
 
 ---
 
-## Limiti noti (v0.1)
+## Audio detection (Whisper)
 
-- Il bip audio è **reattivo**, non predittivo: arriva con ~300-800ms di ritardo dopo la parola pronunciata. È un avviso, non una vera censura preventiva.
+L'audio rilevamento usa **Whisper-tiny** via Transformers.js, on-device:
+
+- Al primo uso del toggle "Bip su audio del tab" l'estensione scarica il modello (~75MB) da `huggingface.co`. Una sola volta. Poi cached in IndexedDB del browser.
+- Library Transformers.js (~22MB di codice + WASM ONNX Runtime) è **bundle locale** in `vendor/transformers/`. Niente CDN al runtime.
+- Inferenza: WebGPU se disponibile, altrimenti fallback WASM.
+- Latenza: chunk audio da 4s -> trascrizione ~0.5-2s -> bip se trovata bestemmia. Totale 4.5-6s di ritardo.
+
+L'architettura precedente (Web Speech API) non funzionava: SR usa il microfono di sistema, non l'audio del tab.
+
+L'architettura intermedia (Gemini Nano multimodale audio) richiede una capability che Chrome non espone stabilmente al momento.
+
+## Limiti noti
+
+- Il bip audio è **reattivo**, non predittivo: ~4-6s di ritardo. È un avviso, non censura preventiva.
 - Bestemmie che attraversano più text node (es. "porco" in un `<b>` e "dio" nel testo successivo) potrebbero non essere catturate dal Tier 1. Il MutationObserver le riprenderà se il DOM cambia.
 - L'estensione non funziona su pagine `chrome://`, `chrome-extension://`, `about:*` (limitazione Chrome, non aggirabile).
-- Su mobile Chrome **non gira** (Gemini Nano non è disponibile su Android/iOS).
+- Su mobile Chrome **non gira** (Gemini Nano non è disponibile su Android/iOS; Transformers.js richiede WebGPU/WASM threading).
 
 ---
 

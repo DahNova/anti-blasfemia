@@ -1,80 +1,79 @@
 // =====================================================================
-// Anti-Bestemmie · offscreen document (audio pipeline v2)
+// Anti-Bestemmie · offscreen document (audio pipeline v3 — Whisper)
 //
-// IMPORTANTE — perché non usiamo più SpeechRecognition:
-// la Web Speech API in Chrome NON può consumare uno stream MediaStream
-// arbitrario, usa SEMPRE il microfono di sistema. Quindi non poteva
-// "sentire" l'audio del tab.
-//
-// Architettura v2 — Gemini Nano multimodale:
+// Strategia:
 //   1. service-worker chiama tabCapture.getMediaStreamId(tabId) (dal popup)
 //   2. ci passa lo streamId via messaggio AUDIO_START
 //   3. qui facciamo navigator.mediaDevices.getUserMedia con quell'id
-//   4. lo stream lo splittiamo:
+//   4. lo stream:
 //        a) -> <audio> playback (l'utente continua a sentire il tab)
-//        b) -> MediaRecorder che produce chunk audio (Blob webm/opus)
-//   5. ogni chunk viene mandato a Nano con prompt multimodale audio:
-//        "Does this audio contain an Italian blasphemy? Reply JSON."
-//   6. se Nano dice sì -> bip
+//        b) -> MediaRecorder webm/opus, chunk da 4s
+//   5. ogni chunk audio:
+//        - decodificato via Web Audio API
+//        - resamplato a 16kHz mono Float32
+//        - passato a whisper-tiny via Transformers.js (on-device, WebGPU/WASM)
+//   6. la trascrizione viene passata al detector Tier 1+2 esistente
+//   7. se è bestemmia -> bip
 //
-// Latenza: ~2.5-4 secondi tra bestemmia pronunciata e bip
-// (chunk window + Nano inference). È reattivo, non predittivo.
-//
-// Fallback: se il modello Nano non supporta input audio nel build di
-// Chrome corrente, l'utente riceve un messaggio chiaro nello status.
+// Modello: onnx-community/whisper-tiny (~75MB scaricato al primo uso da
+// huggingface.co, poi cached in IndexedDB del browser).
 // =====================================================================
+
+import {
+  pipeline,
+  env,
+} from '../../vendor/transformers/transformers.min.mjs';
+
+// Configurazione Transformers.js: usa i nostri file vendor locali, non CDN
+env.backends.onnx.wasm.wasmPaths = chrome.runtime.getURL('vendor/transformers/');
+env.allowLocalModels = false;
+env.allowRemoteModels = true;
+// La cache modelli usa IndexedDB del browser, non dobbiamo gestirla
+env.useBrowserCache = true;
+
+const D = globalThis.__SANTINO_DETECTOR;
+
+const CHUNK_MS = 4000; // 4s chunks (whisper-tiny necessita di contesto)
+const BEEP_COOLDOWN_MS = 600;
+const TARGET_SR = 16000; // Whisper richiede 16kHz mono
 
 let _stream = null;
 let _audioEl = null;
 let _recorder = null;
-let _audioCtx = null;
-let _nanoSession = null;
+let _audioCtx = null; // per beep
+let _decodeCtx = null; // per decodifica chunk
+let _transcriber = null;
 let _running = false;
 let _lastBeepAt = 0;
-const BEEP_COOLDOWN_MS = 500;
-const CHUNK_MS = 2500;
+let _inFlight = false; // evita di accodare troppe inferenze
+let _pendingBlob = null;
 
-const NANO_AUDIO_OPTS = {
-  expectedInputs: [
-    { type: 'audio' },
-    { type: 'text', languages: ['en'] },
-  ],
-  expectedOutputs: [{ type: 'text', languages: ['en'] }],
-};
-
-const SYSTEM_PROMPT =
-  'You analyze short audio clips for Italian blasphemies ("bestemmie"). ' +
-  'An Italian blasphemy is the combination of a sacred word (Dio, Madonna, ' +
-  'Cristo, Gesù) with a profane term (cane, porco, merda, troia, etc). ' +
-  'Examples of blasphemies: "dio cane", "porco dio", "madonna troia", ' +
-  '"porco madonna", "dio porco", "diocan". ' +
-  'NOT blasphemies: "porco zio", "dio mio", "madonna mia", religious ' +
-  'songs/prayers, language discussions. ' +
-  'Reply with valid JSON only, no extra text.';
-
-// ---------- Beep generator ----------
+// ---------- Beep ----------
 
 function ensureAudioCtx() {
   if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   return _audioCtx;
 }
 
+function ensureDecodeCtx() {
+  if (!_decodeCtx) _decodeCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: TARGET_SR });
+  return _decodeCtx;
+}
+
 async function getVolume() {
-  return new Promise((resolve) => {
+  return new Promise((resolve) =>
     chrome.storage.local.get('beepVolume', (v) =>
       resolve(typeof v.beepVolume === 'number' ? v.beepVolume : 0.6)
-    );
-  });
+    )
+  );
 }
 
 async function playBeep(durationMs = 220) {
   const now = Date.now();
   if (now - _lastBeepAt < BEEP_COOLDOWN_MS) return;
   _lastBeepAt = now;
-
   const ctx = ensureAudioCtx();
   if (ctx.state === 'suspended') await ctx.resume();
-
   const volume = await getVolume();
   const osc = ctx.createOscillator();
   const gain = ctx.createGain();
@@ -82,123 +81,120 @@ async function playBeep(durationMs = 220) {
   osc.frequency.value = 1000;
   gain.gain.value = 0;
   osc.connect(gain).connect(ctx.destination);
-
   const t = ctx.currentTime;
   const dur = durationMs / 1000;
   gain.gain.setValueAtTime(0, t);
   gain.gain.linearRampToValueAtTime(volume, t + 0.01);
   gain.gain.setValueAtTime(volume, t + dur - 0.02);
   gain.gain.linearRampToValueAtTime(0, t + dur);
-
   osc.start(t);
   osc.stop(t + dur + 0.02);
   console.log('[Anti-Bestemmie audio] BEEP');
 }
 
-// ---------- Nano init (con audio input) ----------
+// ---------- Whisper init ----------
 
-async function initNanoForAudio() {
-  if (_nanoSession) return _nanoSession;
-  if (!globalThis.LanguageModel) {
-    throw new Error('LanguageModel API non disponibile (serve Chrome 138+).');
-  }
-
-  // Step 1: verifica disponibilità testuale (baseline)
-  const textOnly = { expectedOutputs: [{ type: 'text', languages: ['en'] }] };
-  const textAvail = await LanguageModel.availability(textOnly);
-  console.log('[Anti-Bestemmie audio] Nano availability (text):', textAvail);
-
-  // Step 2: verifica disponibilità con audio
-  const audioAvail = await LanguageModel.availability(NANO_AUDIO_OPTS);
-  console.log('[Anti-Bestemmie audio] Nano availability (audio):', audioAvail);
-
-  if (audioAvail === 'unavailable') {
-    throw new Error(
-      'AUDIO_NOT_SUPPORTED: Gemini Nano su questo dispositivo non ha la ' +
-      "capability audio multimodale. Testo='" + textAvail + "', audio='" + audioAvail + "'. " +
-      'Possibili cause: (1) Chrome non aggiornato — serve almeno Chrome 138+ stable, ' +
-      'meglio 140+; (2) flag mancante — vai su chrome://flags e abilita ' +
-      '"Prompt API for Gemini Nano" oltre a "Optimization Guide On Device Model" ' +
-      '(BypassPerfRequirement); (3) hardware sotto soglia di performance class ' +
-      'per modalità multimodale.'
-    );
-  }
-
-  if (audioAvail === 'downloadable' || audioAvail === 'downloading') {
-    // Proviamo a triggerare il download del modello multimodale con un monitor
-    console.log('[Anti-Bestemmie audio] tentativo download modello audio…');
-    try {
-      _nanoSession = await LanguageModel.create({
-        ...NANO_AUDIO_OPTS,
-        initialPrompts: [{ role: 'system', content: SYSTEM_PROMPT }],
-        temperature: 0.1,
-        topK: 1,
-        monitor(m) {
-          m.addEventListener('downloadprogress', (e) => {
-            const pct = ((e.loaded || 0) * 100).toFixed(1);
-            console.log('[Anti-Bestemmie audio] download audio model:', pct + '%');
-          });
-        },
-      });
-      return _nanoSession;
-    } catch (e) {
-      throw new Error(
-        'AUDIO_DOWNLOAD_FAILED: il modello con audio capability è marked ' +
-        '"' + audioAvail + '" ma create() ha fallito: ' + (e.message || e) + '. ' +
-        'Apri chrome://on-device-internals per dettagli (richiede di abilitare ' +
-        'le pagine di debug da chrome://chrome-urls).'
-      );
+async function initWhisper(progressCb) {
+  if (_transcriber) return _transcriber;
+  console.log('[Anti-Bestemmie audio] init Whisper…');
+  _transcriber = await pipeline(
+    'automatic-speech-recognition',
+    'onnx-community/whisper-tiny',
+    {
+      device: 'webgpu', // fallback automatico a wasm se non c'è
+      dtype: 'fp32',
+      progress_callback: (p) => {
+        if (progressCb) progressCb(p);
+        console.log('[Anti-Bestemmie audio] whisper load:', p?.status, p?.file || '', p?.progress ? p.progress.toFixed(1) + '%' : '');
+      },
     }
-  }
+  );
+  console.log('[Anti-Bestemmie audio] Whisper pronto');
+  return _transcriber;
+}
 
-  // Available
+// ---------- Audio chunk decode + resample ----------
+
+async function blobToMono16k(blob) {
+  const ctx = ensureDecodeCtx();
+  const arr = await blob.arrayBuffer();
+  // decodeAudioData fa il resampling al sampleRate del context (16000)
+  const audioBuffer = await ctx.decodeAudioData(arr);
+  if (audioBuffer.numberOfChannels === 1) {
+    return audioBuffer.getChannelData(0).slice();
+  }
+  // Mix down a mono
+  const len = audioBuffer.length;
+  const out = new Float32Array(len);
+  for (let ch = 0; ch < audioBuffer.numberOfChannels; ch++) {
+    const data = audioBuffer.getChannelData(ch);
+    for (let i = 0; i < len; i++) out[i] += data[i];
+  }
+  const k = 1 / audioBuffer.numberOfChannels;
+  for (let i = 0; i < len; i++) out[i] *= k;
+  return out;
+}
+
+// ---------- Transcribe + detect ----------
+
+async function processChunk(blob) {
+  if (!_transcriber || !blob || blob.size === 0) return;
   try {
-    _nanoSession = await LanguageModel.create({
-      ...NANO_AUDIO_OPTS,
-      initialPrompts: [{ role: 'system', content: SYSTEM_PROMPT }],
-      temperature: 0.1,
-      topK: 1,
+    const samples = await blobToMono16k(blob);
+    // Whisper-tiny ha un context di ~30s. Se mandiamo audio troppo corto
+    // ottiene comunque qualcosa, ma sotto 1s è inaffidabile.
+    if (samples.length < TARGET_SR * 0.6) {
+      console.log('[Anti-Bestemmie audio] chunk troppo corto, skip');
+      return;
+    }
+    const result = await _transcriber(samples, {
+      language: 'italian',
+      task: 'transcribe',
+      chunk_length_s: 30,
+      stride_length_s: 0,
+      return_timestamps: false,
     });
-    return _nanoSession;
+    const text = (result?.text || '').trim();
+    if (!text) return;
+    console.log('[Anti-Bestemmie audio] transcript:', text);
+
+    // Pipe la trascrizione al detector
+    const { matches, suspicious } = D.detectSync(text);
+    if (matches.length > 0) {
+      await playBeep();
+      try { chrome.runtime.sendMessage({ type: 'AUDIO_CENSORED', count: matches.length }); } catch { /* */ }
+      return;
+    }
+    if (suspicious.length > 0) {
+      const extra = await D.detectWithNano(text, suspicious);
+      if (extra.length > 0) {
+        await playBeep();
+        try { chrome.runtime.sendMessage({ type: 'AUDIO_CENSORED', count: extra.length }); } catch { /* */ }
+      }
+    }
   } catch (e) {
-    throw new Error(
-      'AUDIO_CREATE_FAILED: availability() dice "available" ma create() fallisce: ' +
-      (e.message || e) + '. Probabilmente il modello base è scaricato ma la variante ' +
-      'audio multimodale no, oppure il device non supera i check runtime. Apri ' +
-      'chrome://on-device-internals.'
-    );
+    console.warn('[Anti-Bestemmie audio] processChunk error:', e);
   }
 }
 
-const SCHEMA = {
-  type: 'object',
-  properties: {
-    has_blasphemy: { type: 'boolean' },
-  },
-  required: ['has_blasphemy'],
-};
-
-async function classifyChunk(blob) {
-  if (!_nanoSession) return false;
+async function enqueueChunk(blob) {
+  // Strategia: se c'è già un'inferenza in volo, sostituisci il pending
+  // con l'ultimo chunk (drop quelli intermedi). Whisper è più lento del
+  // chunk rate, quindi accodare creerebbe lag crescente.
+  if (_inFlight) {
+    _pendingBlob = blob;
+    return;
+  }
+  _inFlight = true;
   try {
-    const result = await _nanoSession.prompt(
-      [
-        {
-          role: 'user',
-          content: [
-            { type: 'text', value: 'Does this audio clip contain an Italian blasphemy? Respond with JSON.' },
-            { type: 'audio', value: blob },
-          ],
-        },
-      ],
-      { responseConstraint: SCHEMA }
-    );
-    const parsed = JSON.parse(result);
-    console.log('[Anti-Bestemmie audio] chunk verdict:', parsed);
-    return !!parsed.has_blasphemy;
-  } catch (e) {
-    console.warn('[Anti-Bestemmie audio] classify error:', e);
-    return false;
+    await processChunk(blob);
+    while (_pendingBlob) {
+      const next = _pendingBlob;
+      _pendingBlob = null;
+      await processChunk(next);
+    }
+  } finally {
+    _inFlight = false;
   }
 }
 
@@ -207,11 +203,21 @@ async function classifyChunk(blob) {
 async function startCapture(streamId) {
   if (_running) return { ok: true, alreadyRunning: true };
 
-  // STEP 1: prepara la sessione Nano con audio (potrebbe fallire qui)
+  // STEP 1: init Whisper (può scaricare ~75MB la prima volta)
   try {
-    await initNanoForAudio();
+    await initWhisper((p) => {
+      if (p?.status === 'progress' || p?.status === 'downloading') {
+        chrome.runtime.sendMessage({
+          type: 'WHISPER_PROGRESS',
+          file: p.file,
+          progress: p.progress,
+          loaded: p.loaded,
+          total: p.total,
+        });
+      }
+    });
   } catch (e) {
-    return { ok: false, error: e.message };
+    return { ok: false, error: 'Whisper init fallito: ' + (e.message || e) };
   }
 
   // STEP 2: ottieni lo stream
@@ -223,20 +229,16 @@ async function startCapture(streamId) {
       video: false,
     });
   } catch (e) {
-    return { ok: false, error: 'getUserMedia fallito: ' + e.message };
+    return { ok: false, error: 'getUserMedia: ' + e.message };
   }
 
-  // STEP 3: riproduci lo stream (così l'utente continua a sentire il tab)
+  // STEP 3: riproduci lo stream
   _audioEl = new Audio();
   _audioEl.srcObject = _stream;
   _audioEl.autoplay = true;
-  try {
-    await _audioEl.play();
-  } catch {
-    /* autoplay restrictions, ignore */
-  }
+  try { await _audioEl.play(); } catch { /* autoplay quirk */ }
 
-  // STEP 4: avvia MediaRecorder per produrre chunk audio
+  // STEP 4: avvia MediaRecorder
   try {
     const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
       ? 'audio/webm;codecs=opus'
@@ -244,39 +246,25 @@ async function startCapture(streamId) {
     _recorder = new MediaRecorder(_stream, { mimeType: mime });
   } catch (e) {
     stopCapture();
-    return { ok: false, error: 'MediaRecorder fallito: ' + e.message };
+    return { ok: false, error: 'MediaRecorder: ' + e.message };
   }
 
-  _recorder.ondataavailable = async (event) => {
+  _recorder.ondataavailable = (event) => {
     if (!event.data || event.data.size === 0) return;
-    const isBlasphemy = await classifyChunk(event.data);
-    if (isBlasphemy) {
-      await playBeep();
-      try {
-        chrome.runtime.sendMessage({ type: 'AUDIO_CENSORED', count: 1 });
-      } catch {
-        /* ignore */
-      }
-    }
+    enqueueChunk(event.data);
   };
-  _recorder.onerror = (e) => {
-    console.warn('[Anti-Bestemmie audio] recorder error:', e);
-  };
+  _recorder.onerror = (e) => console.warn('[Anti-Bestemmie audio] recorder err:', e);
 
   _recorder.start(CHUNK_MS);
   _running = true;
-  console.log('[Anti-Bestemmie audio] capture started, chunk size:', CHUNK_MS, 'ms');
+  console.log('[Anti-Bestemmie audio] capture started');
   return { ok: true };
 }
 
 function stopCapture() {
   _running = false;
   if (_recorder) {
-    try {
-      _recorder.stop();
-    } catch {
-      /* ignore */
-    }
+    try { _recorder.stop(); } catch { /* ignore */ }
     _recorder = null;
   }
   if (_stream) {
@@ -288,14 +276,6 @@ function stopCapture() {
     _audioEl.srcObject = null;
     _audioEl = null;
   }
-  if (_nanoSession) {
-    try {
-      _nanoSession.destroy();
-    } catch {
-      /* ignore */
-    }
-    _nanoSession = null;
-  }
   console.log('[Anti-Bestemmie audio] capture stopped');
   return { ok: true };
 }
@@ -304,7 +284,6 @@ function stopCapture() {
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (!msg || !msg.type) return;
-
   if (msg.type === 'AUDIO_START') {
     startCapture(msg.streamId).then(sendResponse);
     return true;
