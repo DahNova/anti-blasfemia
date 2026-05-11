@@ -38,13 +38,21 @@ function showProgress(pct) {
   $nanoProgressText.textContent = v.toFixed(1) + '%';
 }
 
+// Stesse lingue usate dal detector. Gemini Nano supporta solo en/es/ja
+// come output, quindi dichiariamo l'output come 'en' (per noi serve solo
+// produrre JSON con un boolean — l'italiano resta come input).
+const NANO_LANG_OPTS = {
+  expectedInputs: [{ type: 'text', languages: ['it', 'en'] }],
+  expectedOutputs: [{ type: 'text', languages: ['en'] }],
+};
+
 async function checkNanoStatus() {
   try {
     if (!globalThis.LanguageModel) {
       $nano.textContent = 'Gemini Nano: API non esposta. Abilita chrome://flags/#prompt-api-for-gemini-nano';
       return;
     }
-    const a = await LanguageModel.availability();
+    const a = await LanguageModel.availability(NANO_LANG_OPTS);
     if (a === 'available') {
       $nano.textContent = 'Gemini Nano: attivo ✓';
       $nano.classList.add('ok');
@@ -73,6 +81,7 @@ async function triggerNanoDownload() {
   showProgress(0);
   try {
     const session = await LanguageModel.create({
+      ...NANO_LANG_OPTS,
       monitor(m) {
         m.addEventListener('downloadprogress', (e) => {
           // e.loaded è 0..1 secondo la spec attuale
