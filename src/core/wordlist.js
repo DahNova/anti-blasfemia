@@ -55,26 +55,43 @@
     /\bsantosacramento\b/giu,
   ];
 
-  // --- Token "sospetti": singole radici che, se incontrate, fanno
-  // partire il controllo Tier 2 (Gemini Nano) sul contesto circostante.
-  // Da sole non sono bestemmie. ---
-  const SUSPICIOUS_TOKENS = [
+  // --- Token "sacri": parole religiose. Da sole NON sono bestemmie. ---
+  const SACRED_TOKENS = [
     /\bd[i1!ì]o\b/giu,
-    /\bp[o0]rc[oa]\b/giu,
     /\bmadonn?a\b/giu,
     /\bcristo\b/giu,
     /\bges[uù]\b/giu,
     /\bsacrament[oi]\b/giu,
   ];
 
-  // Whitelist di frasi innocue contenenti i token sospetti, per evitare
-  // di scomodare Gemini Nano su pattern comuni e ovvi.
+  // --- Token "profani": termini dispregiativi che, accoppiati a un sacro
+  //     a distanza ravvicinata, generano un sospetto da inviare a Nano. ---
+  const PROFANE_TOKENS = [
+    /\bp[o0]rc[oa]\b/giu,
+    /\bcan[ei]?\b/giu,
+    /\bmerda\b/giu,
+    /\btroia\b/giu,
+    /\bputtana\b/giu,
+    /\bboia\b/giu,
+    /\bmaiale\b/giu,
+    /\bbestia\b/giu,
+    /\bladr[oa]\b/giu,
+    /\bschifos[oa]\b/giu,
+    /\bstronz[oa]\b/giu,
+    /\bcagna\b/giu,
+    /\bbagascia\b/giu,
+    /\bimpestata\b/giu,
+    /\binfame\b/giu,
+  ];
+
+  // Whitelist di frasi innocue contenenti il pairing sacro+profano,
+  // per evitare di scomodare Gemini Nano su pattern comuni e ovvi.
   const INNOCENT_PHRASES = [
-    /\bporco\s+(zio|cane|due|dodici|mondo|qua|qui|miseria|paletta|boia(?!\s+d))\b/giu, // "porco zio" è eufemismo
-    /\bd[i1!ì]o\s+(mio|santo|onnipotente|padre|figlio)\b/giu,
-    /\bmadonn?a\s+(mia|santa|del|della|di)\b/giu,
+    /\bporco\s+(zio|cane|due|dodici|mondo|qua|qui|miseria|paletta)\b/giu, // eufemismi
+    /\bd[i1!ì]o\s+(mio|santo|onnipotente|padre|figlio|ti\s+ringrazi|sia\s+lodato)\b/giu,
+    /\bmadonn?a\s+(mia|santa|del|della|di|dei|degli)\b/giu,
     /\bcristo\s+(re|risorto|si|salvatore|signore)\b/giu,
-    /\bges[uù]\s+(cristo|bambino|risorto|salvatore)\s*[!.,;]/giu, // esclamazioni
+    /\bges[uù]\s+(cristo|bambino|risorto|salvatore)/giu,
     /\bgrazie\s+(a\s+)?(dio|d[i1!ì]o)\b/giu,
     /\boh\s+(mio\s+)?dio\b/giu,
     /\bperbacco\b/giu,
@@ -82,7 +99,8 @@
 
   globalThis.__SANTINO_WORDLIST = {
     CERTAIN_PATTERNS,
-    SUSPICIOUS_TOKENS,
+    SACRED_TOKENS,
+    PROFANE_TOKENS,
     INNOCENT_PHRASES,
   };
 })();

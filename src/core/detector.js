@@ -24,15 +24,32 @@
     return;
   }
 
-  // Quanti caratteri di contesto prendere intorno a un token sospetto
+  // Quanti caratteri di contesto prendere intorno a un sospetto
   // per passarlo a Nano (più contesto = giudizio migliore ma più costoso)
   const CONTEXT_RADIUS = 40;
+
+  // Una bestemmia è un sacro + un profano ravvicinati. Definiamo la finestra
+  // massima entro cui considerarli "in pairing" per il sospetto.
+  const PAIRING_MAX_DISTANCE = 25;
 
   function isInnocent(snippet) {
     return WL.INNOCENT_PHRASES.some((re) => {
       re.lastIndex = 0;
       return re.test(snippet);
     });
+  }
+
+  function collectMatches(text, patterns) {
+    const out = [];
+    for (const re of patterns) {
+      re.lastIndex = 0;
+      let m;
+      while ((m = re.exec(text)) !== null) {
+        out.push({ start: m.index, end: m.index + m[0].length });
+        if (m.index === re.lastIndex) re.lastIndex++;
+      }
+    }
+    return out.sort((a, b) => a.start - b.start);
   }
 
   function detectTier1(text) {
@@ -59,33 +76,57 @@
     for (const m of alreadyMatched) {
       for (let i = m.start; i < m.end; i++) covered.add(i);
     }
-    for (const re of WL.SUSPICIOUS_TOKENS) {
-      re.lastIndex = 0;
-      let m;
-      while ((m = re.exec(text)) !== null) {
-        // Skippa se già coperto da Tier 1
-        if (covered.has(m.index)) {
-          if (m.index === re.lastIndex) re.lastIndex++;
-          continue;
+
+    const sacred = collectMatches(text, WL.SACRED_TOKENS);
+    const profane = collectMatches(text, WL.PROFANE_TOKENS);
+    if (sacred.length === 0 || profane.length === 0) return spans;
+
+    // Per ogni token sacro, cerca un token profano entro PAIRING_MAX_DISTANCE.
+    // Un singolo "dio" o "porco" da solo NON è sufficiente per innescare Nano.
+    for (const s of sacred) {
+      // Skip se già censurato da Tier 1
+      if (covered.has(s.start)) continue;
+
+      // Trova il profano più vicino in entrambe le direzioni
+      let nearest = null;
+      let nearestDistance = Infinity;
+      for (const p of profane) {
+        if (covered.has(p.start)) continue;
+        // Distanza minima tra i due range
+        const d = p.start >= s.end
+          ? p.start - s.end
+          : s.start - p.end;
+        if (d < 0) continue; // sovrapposti (improbabile)
+        if (d < nearestDistance) {
+          nearestDistance = d;
+          nearest = p;
         }
-        const ctxStart = Math.max(0, m.index - CONTEXT_RADIUS);
-        const ctxEnd = Math.min(text.length, m.index + m[0].length + CONTEXT_RADIUS);
-        const context = text.slice(ctxStart, ctxEnd);
-        // Skippa pattern innocenti noti (eufemismi, esclamazioni)
-        if (isInnocent(context)) {
-          if (m.index === re.lastIndex) re.lastIndex++;
-          continue;
-        }
-        spans.push({
-          start: m.index,
-          end: m.index + m[0].length,
-          context,
-          ctxStart,
-        });
-        if (m.index === re.lastIndex) re.lastIndex++;
       }
+
+      if (!nearest || nearestDistance > PAIRING_MAX_DISTANCE) continue;
+
+      // Pairing trovato: costruisci la span sospetta che copre entrambi
+      const spanStart = Math.min(s.start, nearest.start);
+      const spanEnd = Math.max(s.end, nearest.end);
+      const ctxStart = Math.max(0, spanStart - CONTEXT_RADIUS);
+      const ctxEnd = Math.min(text.length, spanEnd + CONTEXT_RADIUS);
+      const context = text.slice(ctxStart, ctxEnd);
+
+      // Skip se in contesto innocuo noto
+      if (isInnocent(context)) continue;
+
+      spans.push({
+        start: spanStart,
+        end: spanEnd,
+        context,
+        ctxStart,
+        sacred: { start: s.start, end: s.end },
+        profane: { start: nearest.start, end: nearest.end },
+      });
     }
-    return spans;
+
+    // Dedup: se più sacri condividono lo stesso profano vicino, una span basta
+    return mergeOverlapping(spans);
   }
 
   function detectSync(text) {
@@ -159,14 +200,28 @@
         initialPrompts: [{
           role: 'system',
           content:
-            'You are a classifier of Italian blasphemies. ' +
-            'An Italian blasphemy ("bestemmia") is the combination of a sacred ' +
-            'word (Dio, Madonna, Cristo, Gesù, sacramento, santi) with a ' +
-            'profane or derogatory term (cane, porco, merda, troia, puttana, ' +
-            'boia, ladro, schifoso, etc). ' +
-            'NOT blasphemies: "porco zio", "porco cane", "dio mio", "madonna mia", ' +
-            '"grazie a Dio", religious exclamations, cultural references. ' +
-            'Always respond with valid JSON only, no extra text.',
+            'You classify Italian text snippets as BLASPHEMY or NOT-BLASPHEMY.\n\n' +
+            'A blasphemy ("bestemmia") is an offensive expression that USES ' +
+            'a sacred word (Dio, Madonna, Cristo, Gesù, sacramento) JOINED ' +
+            'with a profane/derogatory term (cane, porco, merda, troia, boia, ' +
+            'maiale, bestia, ladro, schifoso) AS A SINGLE INSULTING PHRASE.\n\n' +
+            'CRITICAL: only flag as blasphemy when the words are USED that way ' +
+            'in the snippet. DO NOT flag when the words appear in:\n' +
+            '- explanatory text (dictionaries, articles ABOUT blasphemies)\n' +
+            '- quoted as examples, between quotation marks or parentheses\n' +
+            '- code blocks, regex patterns, lists of words\n' +
+            '- religious/devotional context (prayers, songs, art)\n' +
+            '- common euphemisms ("porco zio", "porco cane", "dio mio", ' +
+            '"madonna mia", "grazie a Dio", "oh dio")\n' +
+            '- separate sentences (sacred and profane appear close but in ' +
+            'different sentences or clauses, not joined as an insult)\n\n' +
+            'Examples that ARE blasphemies: "porco dio", "dio cane", ' +
+            '"madonna troia", "porco diaccione", "dio merda".\n' +
+            'Examples that are NOT blasphemies: ' +
+            '"il termine \\"porco dio\\" è una bestemmia" (it is mentioning, ' +
+            'not using); "porco zio mio" (euphemism); ' +
+            '"\\"porco\\" in un testo" (quoted as a word).\n\n' +
+            'Reply with valid JSON only, no extra text.',
         }],
         temperature: 0.1,
         topK: 1,
@@ -192,8 +247,12 @@
         required: ['is_blasphemy'],
       };
       const result = await session.prompt(
-        `Questo snippet contiene una bestemmia italiana? Snippet: "${snippet}"\n` +
-          `Se sì, in "phrase" riporta esattamente la bestemmia come appare nello snippet.`,
+        `Snippet: "${snippet}"\n\n` +
+          `Is this snippet USING an Italian blasphemy as an actual insult? ` +
+          `(Set is_blasphemy=false if the snippet only MENTIONS, QUOTES, EXPLAINS, ` +
+          `or LISTS the words. Set is_blasphemy=true only if the words form an ` +
+          `actual blasphemous expression directed as profanity.)\n` +
+          `If true, "phrase" must be the exact blasphemy substring as it appears.`,
         { responseConstraint: schema }
       );
       return JSON.parse(result);

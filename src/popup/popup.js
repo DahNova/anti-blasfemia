@@ -46,10 +46,34 @@ const NANO_LANG_OPTS = {
   expectedOutputs: [{ type: 'text', languages: ['en'] }],
 };
 
+const NANO_AUDIO_OPTS = {
+  expectedInputs: [{ type: 'audio' }, { type: 'text', languages: ['en'] }],
+  expectedOutputs: [{ type: 'text', languages: ['en'] }],
+};
+
+async function probeAudioCapability() {
+  if (!globalThis.LanguageModel) return false;
+  try {
+    const a = await LanguageModel.availability(NANO_AUDIO_OPTS);
+    if (a !== 'available' && a !== 'downloadable') return false;
+    // Avail dice OK ma create() può comunque rifiutare. Facciamo un test create+destroy
+    // veloce (no system prompt, no overhead) per verificare la vera capability.
+    const s = await LanguageModel.create(NANO_AUDIO_OPTS);
+    try { s.destroy(); } catch { /* ignore */ }
+    return true;
+  } catch (e) {
+    console.log('[Anti-Bestemmie] audio probe fail:', e.message);
+    return false;
+  }
+}
+
 async function checkNanoStatus() {
   try {
     if (!globalThis.LanguageModel) {
       $nano.textContent = 'Gemini Nano: API non esposta. Abilita chrome://flags/#prompt-api-for-gemini-nano';
+      // Disabilita audio toggle: senza Nano non c'è proprio detection audio
+      $audio.disabled = true;
+      $audio.parentElement.style.opacity = '0.4';
       return;
     }
     const a = await LanguageModel.availability(NANO_LANG_OPTS);
@@ -58,6 +82,18 @@ async function checkNanoStatus() {
       $nano.classList.add('ok');
       $nanoForce.style.display = 'none';
       $nanoProgressWrap.style.display = 'none';
+
+      // Verifica anche la capability audio (multimodale)
+      const audioOk = await probeAudioCapability();
+      if (!audioOk) {
+        $audio.disabled = true;
+        $audio.parentElement.style.opacity = '0.4';
+        $audio.parentElement.title = 'Nano audio multimodale non supportato su questo Chrome/hardware';
+        showAudioStatus('Audio non disponibile: Nano-multimodale non supportato qui (solo testo funziona)', true);
+      } else {
+        $audio.disabled = false;
+        $audio.parentElement.style.opacity = '';
+      }
     } else if (a === 'downloadable') {
       $nano.textContent = 'Gemini Nano: pronto al download (click sotto per avviare)';
       $nanoForce.style.display = 'block';
