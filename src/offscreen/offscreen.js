@@ -100,29 +100,74 @@ async function playBeep(durationMs = 220) {
 async function initNanoForAudio() {
   if (_nanoSession) return _nanoSession;
   if (!globalThis.LanguageModel) {
-    throw new Error('LanguageModel API non disponibile (serve Chrome 138+ con Gemini Nano).');
+    throw new Error('LanguageModel API non disponibile (serve Chrome 138+).');
   }
-  const avail = await LanguageModel.availability(NANO_AUDIO_OPTS);
-  console.log('[Anti-Bestemmie audio] Nano availability (audio):', avail);
-  if (avail === 'unavailable') {
+
+  // Step 1: verifica disponibilità testuale (baseline)
+  const textOnly = { expectedOutputs: [{ type: 'text', languages: ['en'] }] };
+  const textAvail = await LanguageModel.availability(textOnly);
+  console.log('[Anti-Bestemmie audio] Nano availability (text):', textAvail);
+
+  // Step 2: verifica disponibilità con audio
+  const audioAvail = await LanguageModel.availability(NANO_AUDIO_OPTS);
+  console.log('[Anti-Bestemmie audio] Nano availability (audio):', audioAvail);
+
+  if (audioAvail === 'unavailable') {
     throw new Error(
-      'Gemini Nano non supporta input audio su questo build di Chrome. ' +
-      "L'audio bip richiede multimodalità che non è ancora disponibile."
+      'AUDIO_NOT_SUPPORTED: Gemini Nano su questo dispositivo non ha la ' +
+      "capability audio multimodale. Testo='" + textAvail + "', audio='" + audioAvail + "'. " +
+      'Possibili cause: (1) Chrome non aggiornato — serve almeno Chrome 138+ stable, ' +
+      'meglio 140+; (2) flag mancante — vai su chrome://flags e abilita ' +
+      '"Prompt API for Gemini Nano" oltre a "Optimization Guide On Device Model" ' +
+      '(BypassPerfRequirement); (3) hardware sotto soglia di performance class ' +
+      'per modalità multimodale.'
     );
   }
-  if (avail === 'downloadable' || avail === 'downloading') {
+
+  if (audioAvail === 'downloadable' || audioAvail === 'downloading') {
+    // Proviamo a triggerare il download del modello multimodale con un monitor
+    console.log('[Anti-Bestemmie audio] tentativo download modello audio…');
+    try {
+      _nanoSession = await LanguageModel.create({
+        ...NANO_AUDIO_OPTS,
+        initialPrompts: [{ role: 'system', content: SYSTEM_PROMPT }],
+        temperature: 0.1,
+        topK: 1,
+        monitor(m) {
+          m.addEventListener('downloadprogress', (e) => {
+            const pct = ((e.loaded || 0) * 100).toFixed(1);
+            console.log('[Anti-Bestemmie audio] download audio model:', pct + '%');
+          });
+        },
+      });
+      return _nanoSession;
+    } catch (e) {
+      throw new Error(
+        'AUDIO_DOWNLOAD_FAILED: il modello con audio capability è marked ' +
+        '"' + audioAvail + '" ma create() ha fallito: ' + (e.message || e) + '. ' +
+        'Apri chrome://on-device-internals per dettagli (richiede di abilitare ' +
+        'le pagine di debug da chrome://chrome-urls).'
+      );
+    }
+  }
+
+  // Available
+  try {
+    _nanoSession = await LanguageModel.create({
+      ...NANO_AUDIO_OPTS,
+      initialPrompts: [{ role: 'system', content: SYSTEM_PROMPT }],
+      temperature: 0.1,
+      topK: 1,
+    });
+    return _nanoSession;
+  } catch (e) {
     throw new Error(
-      "Il modello Nano con capacità audio dev'essere scaricato. " +
-      'Apri il popup, premi "Forza download Gemini Nano", attendi il completamento, poi riprova.'
+      'AUDIO_CREATE_FAILED: availability() dice "available" ma create() fallisce: ' +
+      (e.message || e) + '. Probabilmente il modello base è scaricato ma la variante ' +
+      'audio multimodale no, oppure il device non supera i check runtime. Apri ' +
+      'chrome://on-device-internals.'
     );
   }
-  _nanoSession = await LanguageModel.create({
-    ...NANO_AUDIO_OPTS,
-    initialPrompts: [{ role: 'system', content: SYSTEM_PROMPT }],
-    temperature: 0.1,
-    topK: 1,
-  });
-  return _nanoSession;
 }
 
 const SCHEMA = {
