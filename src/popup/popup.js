@@ -117,41 +117,94 @@ $enabled.addEventListener('change', async () => {
   syncEnabledPill($enabled.checked);
 });
 
+const $audioStatus = document.getElementById('audio-status');
+
+function showAudioStatus(msg, isError) {
+  $audioStatus.style.display = 'block';
+  $audioStatus.textContent = msg;
+  $audioStatus.style.color = isError ? '#fca5a5' : 'var(--muted)';
+  console.log('[Anti-Bestemmie audio]', msg);
+}
+
 $audio.addEventListener('change', async () => {
   if ($audio.checked) {
-    // IMPORTANTE: chrome.tabCapture.getMediaStreamId DEVE essere chiamato qui,
-    // nel popup, dentro l'handler del click — il service worker perde lo
-    // user gesture appena gli inoltriamo il messaggio.
-    let streamId, tabId;
+    showAudioStatus('Richiesta cattura audio…');
+
+    // STEP 1: query tab attivo
+    let tab;
     try {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (!tab?.id) throw new Error('Nessun tab attivo');
-      // Tab chrome:// e simili non sono catturabili
-      if (/^(chrome|edge|about|chrome-extension):/i.test(tab.url || '')) {
-        throw new Error('Pagine di sistema (chrome://, ecc.) non sono catturabili');
-      }
-      tabId = tab.id;
-      streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
+      [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      console.log('[Anti-Bestemmie audio] tab query:', tab);
     } catch (e) {
-      alert('Audio non avviato: ' + e.message);
+      showAudioStatus('Errore query tab: ' + e.message, true);
+      $audio.checked = false;
+      return;
+    }
+    if (!tab?.id) {
+      showAudioStatus('Nessun tab attivo trovato', true);
+      $audio.checked = false;
+      return;
+    }
+    if (/^(chrome|edge|about|chrome-extension):/i.test(tab.url || '')) {
+      showAudioStatus(
+        `Pagina di sistema non catturabile: ${tab.url || '(url nascosto)'}. Apri una pagina normale e riprova.`,
+        true
+      );
       $audio.checked = false;
       return;
     }
 
+    // STEP 2: chiede streamId DENTRO l'handler (user gesture attivo)
+    let streamId;
+    try {
+      if (!chrome.tabCapture || !chrome.tabCapture.getMediaStreamId) {
+        throw new Error('chrome.tabCapture non esposto');
+      }
+      streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id });
+      console.log('[Anti-Bestemmie audio] streamId:', streamId);
+    } catch (e) {
+      showAudioStatus('getMediaStreamId fallito: ' + e.message, true);
+      $audio.checked = false;
+      return;
+    }
+    if (!streamId) {
+      showAudioStatus('streamId vuoto (Chrome non ha autorizzato la cattura)', true);
+      $audio.checked = false;
+      return;
+    }
+
+    // STEP 3: passa al service worker per creare offscreen + avviare cattura
     await chrome.storage.local.set({ audioEnabled: true });
-    const resp = await chrome.runtime.sendMessage({
-      type: 'AUDIO_START_REQUEST',
-      streamId,
-      tabId,
-    });
-    if (resp && !resp.ok) {
-      alert('Audio non avviato: ' + (resp.error || 'errore sconosciuto'));
+    let resp;
+    try {
+      resp = await chrome.runtime.sendMessage({
+        type: 'AUDIO_START_REQUEST',
+        streamId,
+        tabId: tab.id,
+      });
+      console.log('[Anti-Bestemmie audio] SW resp:', resp);
+    } catch (e) {
+      showAudioStatus('Messaggio al SW fallito: ' + e.message, true);
       $audio.checked = false;
       await chrome.storage.local.set({ audioEnabled: false });
+      return;
     }
+    if (!resp || !resp.ok) {
+      showAudioStatus('Avvio fallito: ' + (resp?.error || 'risposta vuota'), true);
+      $audio.checked = false;
+      await chrome.storage.local.set({ audioEnabled: false });
+      return;
+    }
+    showAudioStatus('Cattura audio attiva ✓');
   } else {
+    showAudioStatus('Disattivazione…');
     await chrome.storage.local.set({ audioEnabled: false });
-    await chrome.runtime.sendMessage({ type: 'AUDIO_STOP_REQUEST' });
+    try {
+      await chrome.runtime.sendMessage({ type: 'AUDIO_STOP_REQUEST' });
+    } catch (e) {
+      console.warn('[Anti-Bestemmie audio] stop msg err:', e);
+    }
+    $audioStatus.style.display = 'none';
   }
 });
 
