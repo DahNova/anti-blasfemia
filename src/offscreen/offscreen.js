@@ -24,11 +24,13 @@ import {
   env,
 } from '../../vendor/transformers/transformers.min.mjs';
 
-// Configurazione Transformers.js: usa i nostri file vendor locali, non CDN
-env.backends.onnx.wasm.wasmPaths = chrome.runtime.getURL('vendor/transformers/');
+// Configurazione Transformers.js
+// Note: wasmPaths viene risolto automaticamente dal bundle pre-processato
+// (sostituito da new URL("./",import.meta.url).href quindi punta al folder
+// del modulo, dove abbiamo messo ort-wasm-simd-threaded.jsep.wasm).
 env.allowLocalModels = false;
 env.allowRemoteModels = true;
-// La cache modelli usa IndexedDB del browser, non dobbiamo gestirla
+// La cache modelli usa IndexedDB del browser
 env.useBrowserCache = true;
 
 const D = globalThis.__SANTINO_DETECTOR;
