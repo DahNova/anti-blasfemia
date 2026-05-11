@@ -150,10 +150,11 @@
         return null;
       }
       _nanoSession = await LM.create({
-        // L'API di Chrome Nano supporta solo en/es/ja come output language.
-        // Diciamo che l'input è italiano e l'output (JSON con bool + sottostringa
-        // del testo originale) è formalmente inglese.
-        expectedInputs: [{ type: 'text', languages: ['it', 'en'] }],
+        // Chrome Prompt API accetta solo [en, es, ja] sia in input sia in
+        // output. L'italiano non è dichiarabile. Sotto al cofano Gemini Nano
+        // è multilingue e processa l'italiano comunque — dichiariamo 'en'
+        // formalmente, il prompt e i dati restano in italiano.
+        expectedInputs: [{ type: 'text', languages: ['en'] }],
         expectedOutputs: [{ type: 'text', languages: ['en'] }],
         initialPrompts: [{
           role: 'system',

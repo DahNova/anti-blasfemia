@@ -38,11 +38,11 @@ function showProgress(pct) {
   $nanoProgressText.textContent = v.toFixed(1) + '%';
 }
 
-// Stesse lingue usate dal detector. Gemini Nano supporta solo en/es/ja
-// come output, quindi dichiariamo l'output come 'en' (per noi serve solo
-// produrre JSON con un boolean — l'italiano resta come input).
+// Chrome Prompt API supporta solo [en, es, ja]. Dichiariamo 'en' formalmente
+// per evitare l'errore "language options are not supported"; il modello sotto
+// è multilingue e i prompt/dati italiani li gestisce comunque.
 const NANO_LANG_OPTS = {
-  expectedInputs: [{ type: 'text', languages: ['it', 'en'] }],
+  expectedInputs: [{ type: 'text', languages: ['en'] }],
   expectedOutputs: [{ type: 'text', languages: ['en'] }],
 };
 
