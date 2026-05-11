@@ -3,7 +3,6 @@
   "name": "Anti-Bestemmie",
   "version": "0.1.0",
   "description": "Censura bestemmie italiane in testo (asterischi) e audio (bip) sulle pagine che visiti. Funziona on-device con Gemini Nano + blocklist locale.",
-  "default_locale": "it",
 
   "permissions": [
     "storage",
