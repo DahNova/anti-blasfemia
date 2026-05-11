@@ -109,15 +109,39 @@ $enabled.addEventListener('change', async () => {
 });
 
 $audio.addEventListener('change', async () => {
-  await chrome.storage.local.set({ audioEnabled: $audio.checked });
   if ($audio.checked) {
-    const resp = await chrome.runtime.sendMessage({ type: 'AUDIO_START_REQUEST' });
+    // IMPORTANTE: chrome.tabCapture.getMediaStreamId DEVE essere chiamato qui,
+    // nel popup, dentro l'handler del click — il service worker perde lo
+    // user gesture appena gli inoltriamo il messaggio.
+    let streamId, tabId;
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tab?.id) throw new Error('Nessun tab attivo');
+      // Tab chrome:// e simili non sono catturabili
+      if (/^(chrome|edge|about|chrome-extension):/i.test(tab.url || '')) {
+        throw new Error('Pagine di sistema (chrome://, ecc.) non sono catturabili');
+      }
+      tabId = tab.id;
+      streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
+    } catch (e) {
+      alert('Audio non avviato: ' + e.message);
+      $audio.checked = false;
+      return;
+    }
+
+    await chrome.storage.local.set({ audioEnabled: true });
+    const resp = await chrome.runtime.sendMessage({
+      type: 'AUDIO_START_REQUEST',
+      streamId,
+      tabId,
+    });
     if (resp && !resp.ok) {
       alert('Audio non avviato: ' + (resp.error || 'errore sconosciuto'));
       $audio.checked = false;
       await chrome.storage.local.set({ audioEnabled: false });
     }
   } else {
+    await chrome.storage.local.set({ audioEnabled: false });
     await chrome.runtime.sendMessage({ type: 'AUDIO_STOP_REQUEST' });
   }
 });

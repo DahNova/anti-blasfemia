@@ -150,15 +150,22 @@
         return null;
       }
       _nanoSession = await LM.create({
+        // L'API di Chrome Nano supporta solo en/es/ja come output language.
+        // Diciamo che l'input è italiano e l'output (JSON con bool + sottostringa
+        // del testo originale) è formalmente inglese.
+        expectedInputs: [{ type: 'text', languages: ['it', 'en'] }],
+        expectedOutputs: [{ type: 'text', languages: ['en'] }],
         initialPrompts: [{
           role: 'system',
           content:
-            'Sei un classificatore di bestemmie italiane. Una bestemmia è ' +
-            'una combinazione di una parola sacra (Dio, Madonna, Cristo, Gesù, ' +
-            'sacramento, santi) con un termine dispregiativo o profano. ' +
-            'NON sono bestemmie: "porco zio", "porco cane", "dio mio", "madonna mia", ' +
-            '"grazie a Dio", esclamazioni religiose, riferimenti culturali. ' +
-            'Rispondi sempre con JSON valido.',
+            'You are a classifier of Italian blasphemies. ' +
+            'An Italian blasphemy ("bestemmia") is the combination of a sacred ' +
+            'word (Dio, Madonna, Cristo, Gesù, sacramento, santi) with a ' +
+            'profane or derogatory term (cane, porco, merda, troia, puttana, ' +
+            'boia, ladro, schifoso, etc). ' +
+            'NOT blasphemies: "porco zio", "porco cane", "dio mio", "madonna mia", ' +
+            '"grazie a Dio", religious exclamations, cultural references. ' +
+            'Always respond with valid JSON only, no extra text.',
         }],
         temperature: 0.1,
         topK: 1,

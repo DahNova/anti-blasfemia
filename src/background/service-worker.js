@@ -82,29 +82,28 @@ async function closeOffscreen() {
   }
 }
 
-async function startAudioCaptureForActiveTab() {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.id) return { ok: false, error: 'Nessun tab attivo' };
-
-  // tabCapture richiede di ottenere lo streamId nel contesto utente attivo.
-  // In MV3 lo prendiamo dal service worker via getMediaStreamId, poi lo
-  // passiamo all'offscreen doc che fa la getUserMedia.
-  let streamId;
-  try {
-    streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id });
-  } catch (e) {
-    return { ok: false, error: 'tabCapture non disponibile: ' + e.message };
-  }
-
+async function forwardAudioStart(streamId, tabId) {
+  // Lo streamId arriva già pronto dal popup (che ha il user gesture).
+  // Qui ci limitiamo a creare l'offscreen e inoltrare.
   await ensureOffscreen();
   // Piccola attesa per essere certi che l'offscreen sia in ascolto
-  await new Promise((r) => setTimeout(r, 100));
+  await new Promise((r) => setTimeout(r, 150));
 
   return new Promise((resolve) => {
-    chrome.runtime.sendMessage(
-      { type: 'AUDIO_START', streamId, tabId: tab.id },
-      (resp) => resolve(resp || { ok: true })
-    );
+    try {
+      chrome.runtime.sendMessage(
+        { type: 'AUDIO_START', streamId, tabId },
+        (resp) => {
+          if (chrome.runtime.lastError) {
+            resolve({ ok: false, error: 'sendMessage: ' + chrome.runtime.lastError.message });
+          } else {
+            resolve(resp || { ok: true });
+          }
+        }
+      );
+    } catch (e) {
+      resolve({ ok: false, error: 'forward: ' + e.message });
+    }
   });
 }
 
@@ -128,7 +127,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       return;
 
     case 'AUDIO_START_REQUEST':
-      startAudioCaptureForActiveTab().then(sendResponse);
+      // streamId è già stato ottenuto dal popup (che ha lo user gesture)
+      forwardAudioStart(msg.streamId, msg.tabId).then(sendResponse);
       return true;
 
     case 'AUDIO_STOP_REQUEST':
