@@ -1,36 +1,58 @@
 // =====================================================================
-// Anti-Bestemmie · offscreen document (audio pipeline)
+// Anti-Bestemmie · offscreen document (audio pipeline v2)
 //
-// Flusso:
-//   1. service-worker chiama tabCapture.getMediaStreamId(tabId)
+// IMPORTANTE — perché non usiamo più SpeechRecognition:
+// la Web Speech API in Chrome NON può consumare uno stream MediaStream
+// arbitrario, usa SEMPRE il microfono di sistema. Quindi non poteva
+// "sentire" l'audio del tab.
+//
+// Architettura v2 — Gemini Nano multimodale:
+//   1. service-worker chiama tabCapture.getMediaStreamId(tabId) (dal popup)
 //   2. ci passa lo streamId via messaggio AUDIO_START
 //   3. qui facciamo navigator.mediaDevices.getUserMedia con quell'id
 //   4. lo stream lo splittiamo:
 //        a) -> <audio> playback (l'utente continua a sentire il tab)
-//        b) -> SpeechRecognition (trascrive in tempo reale)
-//   5. ogni transcript di SpeechRecognition viene passato al detector
-//   6. se trova una bestemmia, suoniamo un BIP via Web Audio API
-//      sovrapposto. (Per i puristi: in v0.1 il bip è additivo, l'audio
-//      originale non viene mutato; v0.2 può fare ducking dinamico.)
+//        b) -> MediaRecorder che produce chunk audio (Blob webm/opus)
+//   5. ogni chunk viene mandato a Nano con prompt multimodale audio:
+//        "Does this audio contain an Italian blasphemy? Reply JSON."
+//   6. se Nano dice sì -> bip
 //
-// Limiti noti:
-//   - SpeechRecognition in Chrome è continua ma soggetta a riconnessioni;
-//     usiamo retry automatico e modalità interim+final.
-//   - Latenza ~300-800ms tra parola pronunciata e bip. È un bip *reattivo*,
-//     non predittivo. Per il caso d'uso (avvisare l'utente) è accettabile.
+// Latenza: ~2.5-4 secondi tra bestemmia pronunciata e bip
+// (chunk window + Nano inference). È reattivo, non predittivo.
+//
+// Fallback: se il modello Nano non supporta input audio nel build di
+// Chrome corrente, l'utente riceve un messaggio chiaro nello status.
 // =====================================================================
-
-const D = globalThis.__SANTINO_DETECTOR;
 
 let _stream = null;
 let _audioEl = null;
-let _recognition = null;
+let _recorder = null;
 let _audioCtx = null;
+let _nanoSession = null;
 let _running = false;
 let _lastBeepAt = 0;
-const BEEP_COOLDOWN_MS = 400;
+const BEEP_COOLDOWN_MS = 500;
+const CHUNK_MS = 2500;
 
-// ---------- Beep generator (Web Audio API) ----------
+const NANO_AUDIO_OPTS = {
+  expectedInputs: [
+    { type: 'audio' },
+    { type: 'text', languages: ['en'] },
+  ],
+  expectedOutputs: [{ type: 'text', languages: ['en'] }],
+};
+
+const SYSTEM_PROMPT =
+  'You analyze short audio clips for Italian blasphemies ("bestemmie"). ' +
+  'An Italian blasphemy is the combination of a sacred word (Dio, Madonna, ' +
+  'Cristo, Gesù) with a profane term (cane, porco, merda, troia, etc). ' +
+  'Examples of blasphemies: "dio cane", "porco dio", "madonna troia", ' +
+  '"porco madonna", "dio porco", "diocan". ' +
+  'NOT blasphemies: "porco zio", "dio mio", "madonna mia", religious ' +
+  'songs/prayers, language discussions. ' +
+  'Reply with valid JSON only, no extra text.';
+
+// ---------- Beep generator ----------
 
 function ensureAudioCtx() {
   if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -39,7 +61,9 @@ function ensureAudioCtx() {
 
 async function getVolume() {
   return new Promise((resolve) => {
-    chrome.storage.local.get('beepVolume', (v) => resolve(typeof v.beepVolume === 'number' ? v.beepVolume : 0.6));
+    chrome.storage.local.get('beepVolume', (v) =>
+      resolve(typeof v.beepVolume === 'number' ? v.beepVolume : 0.6)
+    );
   });
 }
 
@@ -61,7 +85,6 @@ async function playBeep(durationMs = 220) {
 
   const t = ctx.currentTime;
   const dur = durationMs / 1000;
-  // Envelope attack/decay rapidi per evitare click
   gain.gain.setValueAtTime(0, t);
   gain.gain.linearRampToValueAtTime(volume, t + 0.01);
   gain.gain.setValueAtTime(volume, t + dur - 0.02);
@@ -69,6 +92,69 @@ async function playBeep(durationMs = 220) {
 
   osc.start(t);
   osc.stop(t + dur + 0.02);
+  console.log('[Anti-Bestemmie audio] BEEP');
+}
+
+// ---------- Nano init (con audio input) ----------
+
+async function initNanoForAudio() {
+  if (_nanoSession) return _nanoSession;
+  if (!globalThis.LanguageModel) {
+    throw new Error('LanguageModel API non disponibile (serve Chrome 138+ con Gemini Nano).');
+  }
+  const avail = await LanguageModel.availability(NANO_AUDIO_OPTS);
+  console.log('[Anti-Bestemmie audio] Nano availability (audio):', avail);
+  if (avail === 'unavailable') {
+    throw new Error(
+      'Gemini Nano non supporta input audio su questo build di Chrome. ' +
+      "L'audio bip richiede multimodalità che non è ancora disponibile."
+    );
+  }
+  if (avail === 'downloadable' || avail === 'downloading') {
+    throw new Error(
+      "Il modello Nano con capacità audio dev'essere scaricato. " +
+      'Apri il popup, premi "Forza download Gemini Nano", attendi il completamento, poi riprova.'
+    );
+  }
+  _nanoSession = await LanguageModel.create({
+    ...NANO_AUDIO_OPTS,
+    initialPrompts: [{ role: 'system', content: SYSTEM_PROMPT }],
+    temperature: 0.1,
+    topK: 1,
+  });
+  return _nanoSession;
+}
+
+const SCHEMA = {
+  type: 'object',
+  properties: {
+    has_blasphemy: { type: 'boolean' },
+  },
+  required: ['has_blasphemy'],
+};
+
+async function classifyChunk(blob) {
+  if (!_nanoSession) return false;
+  try {
+    const result = await _nanoSession.prompt(
+      [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', value: 'Does this audio clip contain an Italian blasphemy? Respond with JSON.' },
+            { type: 'audio', value: blob },
+          ],
+        },
+      ],
+      { responseConstraint: SCHEMA }
+    );
+    const parsed = JSON.parse(result);
+    console.log('[Anti-Bestemmie audio] chunk verdict:', parsed);
+    return !!parsed.has_blasphemy;
+  } catch (e) {
+    console.warn('[Anti-Bestemmie audio] classify error:', e);
+    return false;
+  }
 }
 
 // ---------- Capture pipeline ----------
@@ -76,6 +162,14 @@ async function playBeep(durationMs = 220) {
 async function startCapture(streamId) {
   if (_running) return { ok: true, alreadyRunning: true };
 
+  // STEP 1: prepara la sessione Nano con audio (potrebbe fallire qui)
+  try {
+    await initNanoForAudio();
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+
+  // STEP 2: ottieni lo stream
   try {
     _stream = await navigator.mediaDevices.getUserMedia({
       audio: {
@@ -87,82 +181,58 @@ async function startCapture(streamId) {
     return { ok: false, error: 'getUserMedia fallito: ' + e.message };
   }
 
-  // Riproduci lo stream così l'utente continua a sentire il tab
+  // STEP 3: riproduci lo stream (così l'utente continua a sentire il tab)
   _audioEl = new Audio();
   _audioEl.srcObject = _stream;
   _audioEl.autoplay = true;
-  // Importante: senza play() esplicito a volte Chrome blocca
-  try { await _audioEl.play(); } catch { /* ignore */ }
+  try {
+    await _audioEl.play();
+  } catch {
+    /* autoplay restrictions, ignore */
+  }
 
-  startRecognition();
+  // STEP 4: avvia MediaRecorder per produrre chunk audio
+  try {
+    const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+      ? 'audio/webm;codecs=opus'
+      : 'audio/webm';
+    _recorder = new MediaRecorder(_stream, { mimeType: mime });
+  } catch (e) {
+    stopCapture();
+    return { ok: false, error: 'MediaRecorder fallito: ' + e.message };
+  }
+
+  _recorder.ondataavailable = async (event) => {
+    if (!event.data || event.data.size === 0) return;
+    const isBlasphemy = await classifyChunk(event.data);
+    if (isBlasphemy) {
+      await playBeep();
+      try {
+        chrome.runtime.sendMessage({ type: 'AUDIO_CENSORED', count: 1 });
+      } catch {
+        /* ignore */
+      }
+    }
+  };
+  _recorder.onerror = (e) => {
+    console.warn('[Anti-Bestemmie audio] recorder error:', e);
+  };
+
+  _recorder.start(CHUNK_MS);
   _running = true;
+  console.log('[Anti-Bestemmie audio] capture started, chunk size:', CHUNK_MS, 'ms');
   return { ok: true };
-}
-
-function startRecognition() {
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR) {
-    console.warn('[Anti-Bestemmie] SpeechRecognition non supportato');
-    return;
-  }
-  _recognition = new SR();
-  _recognition.lang = 'it-IT';
-  _recognition.continuous = true;
-  _recognition.interimResults = true;
-  _recognition.maxAlternatives = 1;
-
-  _recognition.onresult = onTranscript;
-  _recognition.onerror = (e) => {
-    // 'no-speech', 'aborted', 'network' sono comuni — tentiamo restart
-    console.warn('[Anti-Bestemmie] SR error:', e.error);
-  };
-  _recognition.onend = () => {
-    if (_running) {
-      // auto-restart, SpeechRecognition tende a chiudersi da solo
-      try { _recognition.start(); } catch { /* ignore */ }
-    }
-  };
-  try { _recognition.start(); } catch (e) {
-    console.warn('[Anti-Bestemmie] SR start fallito:', e);
-  }
-}
-
-// Evita di rianalizzare lo stesso pezzo di interim più volte
-let _lastAnalyzed = '';
-
-async function onTranscript(event) {
-  // Prendi l'ultimo risultato (anche interim) per minimizzare latenza
-  let text = '';
-  for (let i = event.resultIndex; i < event.results.length; i++) {
-    text += event.results[i][0].transcript;
-  }
-  text = text.trim().toLowerCase();
-  if (!text || text === _lastAnalyzed) return;
-  _lastAnalyzed = text;
-
-  // Tier 1 sincrono
-  const { matches, suspicious } = D.detectSync(text);
-  if (matches.length > 0) {
-    playBeep();
-    chrome.runtime.sendMessage({ type: 'AUDIO_CENSORED', count: matches.length });
-    return;
-  }
-
-  // Tier 2 asincrono — Nano valuta solo i sospetti
-  if (suspicious.length > 0) {
-    const extra = await D.detectWithNano(text, suspicious);
-    if (extra.length > 0) {
-      playBeep();
-      chrome.runtime.sendMessage({ type: 'AUDIO_CENSORED', count: extra.length });
-    }
-  }
 }
 
 function stopCapture() {
   _running = false;
-  if (_recognition) {
-    try { _recognition.stop(); } catch { /* ignore */ }
-    _recognition = null;
+  if (_recorder) {
+    try {
+      _recorder.stop();
+    } catch {
+      /* ignore */
+    }
+    _recorder = null;
   }
   if (_stream) {
     for (const t of _stream.getTracks()) t.stop();
@@ -173,6 +243,15 @@ function stopCapture() {
     _audioEl.srcObject = null;
     _audioEl = null;
   }
+  if (_nanoSession) {
+    try {
+      _nanoSession.destroy();
+    } catch {
+      /* ignore */
+    }
+    _nanoSession = null;
+  }
+  console.log('[Anti-Bestemmie audio] capture stopped');
   return { ok: true };
 }
 
