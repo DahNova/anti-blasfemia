@@ -1,4 +1,4 @@
-import*as e from"fs";import*as t from"onnxruntime-node";import*as r from"path";import*as n from"sharp";import*as o from"url";var s,a,i={fs:
+import*as e from"../stubs/node-empty.js";import*as t from"../stubs/node-empty.js";import*as r from"../stubs/node-empty.js";import*as n from"../stubs/node-empty.js";import*as o from"../stubs/node-empty.js";var s,a,i={fs:
 /*!*********************!*\
   !*** external "fs" ***!
   \*********************/t=>{t.exports=e},"onnxruntime-node":
