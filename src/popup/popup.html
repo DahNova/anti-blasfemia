@@ -150,6 +150,16 @@
       </span>
     </div>
     <div class="nano-status" id="nano-status">Gemini Nano: verifica…</div>
+    <div id="nano-progress-wrap" style="display:none; margin-top:6px">
+      <div style="background:var(--accent-off); border-radius:4px; height:6px; overflow:hidden">
+        <div id="nano-progress-bar" style="background:var(--accent); height:100%; width:0%; transition:width 0.2s"></div>
+      </div>
+      <div id="nano-progress-text" style="font-size:11px; color:var(--muted); margin-top:4px">0%</div>
+    </div>
+    <button class="btn" id="nano-force" style="display:none; margin-top:8px">Forza download Gemini Nano</button>
+    <div style="font-size:11px; color:var(--muted); margin-top:6px">
+      Debug: <a href="#" id="open-internals" style="color:var(--muted)">chrome://on-device-internals</a>
+    </div>
   </div>
 
   <div class="section">

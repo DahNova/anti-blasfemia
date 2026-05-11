@@ -25,26 +25,83 @@ async function load() {
   $total.textContent = String(s.totalCensored || 0);
 }
 
+const $nanoProgressWrap = document.getElementById('nano-progress-wrap');
+const $nanoProgressBar = document.getElementById('nano-progress-bar');
+const $nanoProgressText = document.getElementById('nano-progress-text');
+const $nanoForce = document.getElementById('nano-force');
+const $openInternals = document.getElementById('open-internals');
+
+function showProgress(pct) {
+  $nanoProgressWrap.style.display = 'block';
+  const v = Math.max(0, Math.min(100, pct));
+  $nanoProgressBar.style.width = v.toFixed(1) + '%';
+  $nanoProgressText.textContent = v.toFixed(1) + '%';
+}
+
 async function checkNanoStatus() {
-  // Verifica nel contesto del popup
   try {
     if (!globalThis.LanguageModel) {
-      $nano.textContent = 'Gemini Nano: non disponibile (Chrome 138+ richiesto, ~22GB disco)';
+      $nano.textContent = 'Gemini Nano: API non esposta. Abilita chrome://flags/#prompt-api-for-gemini-nano';
       return;
     }
     const a = await LanguageModel.availability();
     if (a === 'available') {
       $nano.textContent = 'Gemini Nano: attivo ✓';
       $nano.classList.add('ok');
-    } else if (a === 'downloadable' || a === 'downloading') {
-      $nano.textContent = 'Gemini Nano: in download…';
+      $nanoForce.style.display = 'none';
+      $nanoProgressWrap.style.display = 'none';
+    } else if (a === 'downloadable') {
+      $nano.textContent = 'Gemini Nano: pronto al download (click sotto per avviare)';
+      $nanoForce.style.display = 'block';
+    } else if (a === 'downloading') {
+      $nano.textContent = 'Gemini Nano: download in corso… (apri chrome://on-device-internals per dettagli)';
+      $nanoForce.style.display = 'block';
+      $nanoForce.textContent = 'Aggancia monitor di progresso';
+    } else if (a === 'unavailable') {
+      $nano.textContent = 'Gemini Nano: NON disponibile su questo dispositivo (controlla disco libero ≥22GB, OS supportato)';
     } else {
-      $nano.textContent = 'Gemini Nano: non disponibile su questo dispositivo';
+      $nano.textContent = 'Gemini Nano: stato sconosciuto "' + a + '"';
     }
   } catch (e) {
     $nano.textContent = 'Gemini Nano: errore (' + e.message + ')';
   }
 }
+
+async function triggerNanoDownload() {
+  if (!globalThis.LanguageModel) return;
+  $nano.textContent = 'Gemini Nano: avvio download…';
+  showProgress(0);
+  try {
+    const session = await LanguageModel.create({
+      monitor(m) {
+        m.addEventListener('downloadprogress', (e) => {
+          // e.loaded è 0..1 secondo la spec attuale
+          const pct = (e.loaded || 0) * 100;
+          showProgress(pct);
+          if (pct >= 100) {
+            $nano.textContent = 'Gemini Nano: download completato, inizializzazione…';
+          } else {
+            $nano.textContent = 'Gemini Nano: scaricato ' + pct.toFixed(1) + '%';
+          }
+        });
+      },
+    });
+    $nano.textContent = 'Gemini Nano: attivo ✓';
+    $nano.classList.add('ok');
+    $nanoForce.style.display = 'none';
+    $nanoProgressWrap.style.display = 'none';
+    // Test rapido
+    try { session.destroy(); } catch { /* ignore */ }
+  } catch (e) {
+    $nano.textContent = 'Gemini Nano: download fallito (' + e.message + ')';
+  }
+}
+
+$nanoForce.addEventListener('click', triggerNanoDownload);
+$openInternals.addEventListener('click', (e) => {
+  e.preventDefault();
+  chrome.tabs.create({ url: 'chrome://on-device-internals' });
+});
 
 $enabled.addEventListener('change', async () => {
   await chrome.storage.local.set({ enabled: $enabled.checked });
