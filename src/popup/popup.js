@@ -126,14 +126,20 @@ function showAudioStatus(msg, isError) {
   console.log('[Anti-Bestemmie audio]', msg);
 }
 
-// Ascolta progress download Whisper inoltrato dal service worker
+// Ascolta messaggi dall'offscreen relativi al pipeline audio
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg?.type === 'WHISPER_PROGRESS') {
     const pct = msg.progress ? msg.progress.toFixed(0) : '?';
     const file = msg.file ? msg.file.split('/').pop() : '';
     showAudioStatus(`Whisper: scaricando ${file} ${pct}%…`);
   } else if (msg?.type === 'WHISPER_READY') {
-    showAudioStatus('Whisper pronto, cattura audio attiva ✓');
+    showAudioStatus('Whisper pronto, avvio cattura…');
+  } else if (msg?.type === 'AUDIO_STARTED') {
+    showAudioStatus('Cattura audio attiva ✓');
+  } else if (msg?.type === 'AUDIO_ERROR') {
+    showAudioStatus('Errore audio: ' + msg.error, true);
+    $audio.checked = false;
+    chrome.storage.local.set({ audioEnabled: false });
   }
 });
 
@@ -206,7 +212,10 @@ $audio.addEventListener('change', async () => {
       await chrome.storage.local.set({ audioEnabled: false });
       return;
     }
-    showAudioStatus('Cattura audio attiva ✓');
+    // Stream acquisito, ma il modello Whisper potrebbe scaricarsi ancora.
+    // Lo status finale arriverà via runtime msg (WHISPER_PROGRESS/READY,
+    // AUDIO_STARTED, AUDIO_ERROR).
+    showAudioStatus('Stream acquisito, caricamento Whisper…');
   } else {
     showAudioStatus('Disattivazione…');
     await chrome.storage.local.set({ audioEnabled: false });

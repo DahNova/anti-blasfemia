@@ -205,24 +205,8 @@ async function enqueueChunk(blob) {
 async function startCapture(streamId) {
   if (_running) return { ok: true, alreadyRunning: true };
 
-  // STEP 1: init Whisper (può scaricare ~75MB la prima volta)
-  try {
-    await initWhisper((p) => {
-      if (p?.status === 'progress' || p?.status === 'downloading') {
-        chrome.runtime.sendMessage({
-          type: 'WHISPER_PROGRESS',
-          file: p.file,
-          progress: p.progress,
-          loaded: p.loaded,
-          total: p.total,
-        });
-      }
-    });
-  } catch (e) {
-    return { ok: false, error: 'Whisper init fallito: ' + (e.message || e) };
-  }
-
-  // STEP 2: ottieni lo stream
+  // STEP 1 (sincrono critico): acquisisci IMMEDIATAMENTE lo stream prima
+  // che lo streamId scada (TTL di chrome.tabCapture ~10s).
   try {
     _stream = await navigator.mediaDevices.getUserMedia({
       audio: {
@@ -230,37 +214,73 @@ async function startCapture(streamId) {
       },
       video: false,
     });
+    console.log('[Anti-Bestemmie audio] stream acquisito');
   } catch (e) {
     return { ok: false, error: 'getUserMedia: ' + e.message };
   }
 
-  // STEP 3: riproduci lo stream
+  // STEP 2: riproduci subito lo stream (l'utente continua a sentire il tab,
+  // e mantiene attivo il MediaStream)
   _audioEl = new Audio();
   _audioEl.srcObject = _stream;
   _audioEl.autoplay = true;
   try { await _audioEl.play(); } catch { /* autoplay quirk */ }
 
-  // STEP 4: avvia MediaRecorder
-  try {
-    const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-      ? 'audio/webm;codecs=opus'
-      : 'audio/webm';
-    _recorder = new MediaRecorder(_stream, { mimeType: mime });
-  } catch (e) {
+  // STEP 3+ (asincrono in background): carica Whisper e poi avvia recorder.
+  // NON awaitiamo qui: il popup ottiene "ok" subito (stream è al sicuro),
+  // il caricamento del modello procede e notifica progress via runtime msg.
+  // Se il popup si chiude durante il download, l'offscreen continua.
+  finishCaptureAsync().catch((e) => {
+    console.error('[Anti-Bestemmie audio] finishCaptureAsync err:', e);
+    try {
+      chrome.runtime.sendMessage({
+        type: 'AUDIO_ERROR',
+        error: e.message || String(e),
+      });
+    } catch { /* */ }
     stopCapture();
-    return { ok: false, error: 'MediaRecorder: ' + e.message };
+  });
+
+  return { ok: true, message: 'stream acquired, loading model…' };
+}
+
+async function finishCaptureAsync() {
+  // STEP 3: init Whisper (può scaricare ~75MB la prima volta)
+  await initWhisper((p) => {
+    if (p?.status === 'progress' || p?.status === 'downloading') {
+      try {
+        chrome.runtime.sendMessage({
+          type: 'WHISPER_PROGRESS',
+          file: p.file,
+          progress: p.progress,
+          loaded: p.loaded,
+          total: p.total,
+        });
+      } catch { /* popup chiuso, fine */ }
+    }
+  });
+  try { chrome.runtime.sendMessage({ type: 'WHISPER_READY' }); } catch { /* */ }
+
+  // Verifica che lo stream sia ancora vivo (l'utente potrebbe aver chiuso
+  // il tab durante il download)
+  if (!_stream || _stream.getTracks().every((t) => t.readyState === 'ended')) {
+    throw new Error('Stream chiuso prima del completamento del caricamento modello');
   }
 
+  // STEP 4: avvia MediaRecorder
+  const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+    ? 'audio/webm;codecs=opus'
+    : 'audio/webm';
+  _recorder = new MediaRecorder(_stream, { mimeType: mime });
   _recorder.ondataavailable = (event) => {
     if (!event.data || event.data.size === 0) return;
     enqueueChunk(event.data);
   };
   _recorder.onerror = (e) => console.warn('[Anti-Bestemmie audio] recorder err:', e);
-
   _recorder.start(CHUNK_MS);
   _running = true;
   console.log('[Anti-Bestemmie audio] capture started');
-  return { ok: true };
+  try { chrome.runtime.sendMessage({ type: 'AUDIO_STARTED' }); } catch { /* */ }
 }
 
 function stopCapture() {
