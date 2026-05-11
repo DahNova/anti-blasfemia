@@ -7,6 +7,22 @@
 <body>
   <!-- Offscreen documents non hanno UI visibile.
        v0.3 — audio pipeline su Whisper (Transformers.js, on-device, WebGPU). -->
+
+  <!-- Import map: stub-pa i moduli Node-only che il bundle ESM di
+       transformers.min.mjs importa staticamente (ma non chiama mai
+       nel codice browser). Senza questo il parser ESM fallisce. -->
+  <script type="importmap">
+  {
+    "imports": {
+      "fs": "/vendor/stubs/node-empty.js",
+      "path": "/vendor/stubs/node-empty.js",
+      "url": "/vendor/stubs/node-empty.js",
+      "sharp": "/vendor/stubs/node-empty.js",
+      "onnxruntime-node": "/vendor/stubs/node-empty.js"
+    }
+  }
+  </script>
+
   <script src="../core/wordlist.js"></script>
   <script src="../core/detector.js"></script>
   <script type="module" src="offscreen.js"></script>

@@ -58,7 +58,8 @@
     {
       "resources": [
         "src/offscreen/offscreen.html",
-        "vendor/transformers/*"
+        "vendor/transformers/*",
+        "vendor/stubs/*"
       ],
       "matches": ["<all_urls>"]
     }
